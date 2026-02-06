@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 1. CSS 美化 (保持高级感) ---
+# --- 1. CSS 美化 ---
 st.markdown("""
 <style>
     .stApp { background-color: #f4f5f7; font-family: 'PingFang SC', sans-serif; }
@@ -22,12 +22,9 @@ st.markdown("""
         background-color: #ffffff; padding: 15px; border-radius: 8px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 5px solid #0052cc;
     }
-    /* Tab 样式优化 */
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #ffffff; border-radius: 4px; font-weight: 600; }
     .stTabs [aria-selected="true"] { background-color: #deebff; color: #0052cc; }
-    /* 风险提示条 */
-    .risk-alert { padding: 10px; border-radius: 5px; margin-bottom: 10px; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,72 +39,59 @@ def load_business_data(file_path, simulation_date=None):
 
     df.columns = df.columns.str.strip()
     
-    # 日期处理
     date_cols = ['下单日期', '要求交期', '发货日期', '技术确认日期']
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # 确定计算基准日期 (支持时光倒流)
     today = pd.to_datetime(simulation_date) if simulation_date else pd.to_datetime(datetime.date.today())
 
-    # --- 逻辑核心 ---
-    
-    # 1. 计算实际完成日期
+    # 1. 完工日期
     if '发货日期' in df.columns and '技术确认日期' in df.columns:
         df['完工日期'] = df['发货日期'].fillna(df['技术确认日期'])
     else:
         df['完工日期'] = pd.NaT
 
-    # 2. 状态判定 (全面包含当前与历史)
+    # 2. 状态判定
     def evaluate_status(row):
         deadline = row.get('要求交期')
         done_date = row.get('完工日期')
         
         if pd.isnull(deadline): return "⚪ 未知"
         
-        # 判断是否在“当下”已经完成
-        # 如果完成日期 > 模拟今天，则在模拟视角下视为“未完成”
         is_completed = pd.notnull(done_date) and (done_date <= today)
         
         if is_completed:
-            # === 历史数据判断 ===
             if done_date > deadline:
-                return "⚠️ 逾期交付 (历史)" # 重点：历史问题
+                return "⚠️ 逾期交付 (历史)"
             else:
                 return "✅ 按时交付"
         else:
-            # === 当前数据判断 ===
             days_left = (deadline - today).days
             if days_left < 0:
-                return "🔴 严重逾期 (进行中)" # 重点：当下火灾
+                return "🔴 严重逾期 (进行中)"
             elif days_left <= 3:
-                return "🟠 紧急 (3天内)" # 重点：当下预警
+                return "🟠 紧急 (3天内)"
             else:
                 return "🔵 正常进行"
 
     df['业务状态'] = df.apply(evaluate_status, axis=1)
     
-    # 3. 辅助计算 (剩余天数/超期天数)
-    # 如果未完成：显示距离截止日还有几天（负数表示已超期）
-    # 如果已完成：显示超期了几天（正数表示超期天数，0表示按时）
+    # 3. 辅助计算 (剩余天数)
     def calc_days_gap(row):
         deadline = row.get('要求交期')
         done_date = row.get('完工日期')
         
         if "历史" in row['业务状态']:
-            # 历史逾期：实际完成日 - 要求交期 (正数)
             return (done_date - deadline).days
-        elif "进行" in row['业务状态'] or "紧急" in row['业务状态'] or "严重" in row['业务状态']:
-            # 进行中：要求交期 - 今天 (负数表示逾期)
-            return (deadline - today).days
         else:
-            # 正常进行：要求交期 - 今天 (正数表示剩余天数)
+            # 无论逾期还是正常，都计算 截止日 - 今天
+            # 负数=已逾期，正数=剩余天数
             return (deadline - today).days
 
     df['时间差指标'] = df.apply(calc_days_gap, axis=1)
 
-    # 4. 填充空值
+    # 4. 填充
     df['寄出总数量'] = df['寄出总数量'].fillna(0)
     for c in ['客户', '款式', '业务员', '设计员']:
         if c in df.columns: df[c] = df[c].fillna("未知")
@@ -118,11 +102,10 @@ def load_business_data(file_path, simulation_date=None):
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/000000/factory.png", width=60)
-    st.markdown("### 中兴智能工厂")
+    st.markdown("### 中兴开发中心Dashboard")
     
-    st.markdown("#### ⏱️ 模拟日期")
     real_today = datetime.date.today()
-    sim_date = st.date_input("基准日期", value=real_today, help="修改此日期可以查看过去某一天的生产状况")
+    sim_date = st.date_input("基准日期", value=real_today)
     
     st.markdown("---")
     uploaded_file = st.file_uploader("📂 数据源 (Excel)", type=["xlsx"])
@@ -137,42 +120,34 @@ with st.sidebar:
 
 if df is not None:
     
-    # === KPI 核心指标 ===
+    # === KPI ===
     current_overdue = len(df[df['业务状态'] == "🔴 严重逾期 (进行中)"])
     current_urgent = len(df[df['业务状态'] == "🟠 紧急 (3天内)"])
     history_bad = len(df[df['业务状态'] == "⚠️ 逾期交付 (历史)"])
     
-    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-    with col_kpi1:
-        st.metric("🚨 需立即干预 (当前)", f"{current_overdue} 单", "正在发生的延误", delta_color="inverse")
-    with col_kpi2:
-        st.metric("🟠 3日内临期 (当前)", f"{current_urgent} 单", "即将发生的延误", delta_color="inverse")
-    with col_kpi3:
-        st.metric("⚠️ 历史逾期记录", f"{history_bad} 单", "已完工但超期", delta_color="off")
-    with col_kpi4:
-        total_orders = len(df)
-        total_issues = current_overdue + history_bad
-        rate = (total_issues / total_orders * 100) if total_orders > 0 else 0
-        st.metric("整体履约异常率", f"{rate:.1f}%", f"总计 {total_issues} 个问题单")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("🚨 需立即干预", f"{current_overdue} 单", "已逾期", delta_color="inverse")
+    col2.metric("🟠 3日内临期", f"{current_urgent} 单", "即将逾期", delta_color="inverse")
+    col3.metric("⚠️ 历史逾期", f"{history_bad} 单", "已完工", delta_color="off")
+    
+    total_orders = len(df)
+    total_issues = current_overdue + history_bad
+    rate = (total_issues / total_orders * 100) if total_orders > 0 else 0
+    col4.metric("履约异常率", f"{rate:.1f}%", f"共 {total_issues} 异常")
 
     st.divider()
 
     tab1, tab2, tab3, tab4 = st.tabs([
-        "1.风险与问题管控 (Risk & Issues)", 
+        "1.风险管控 (Risk Log)", 
         "2.技术员绩效", 
         "3.智能洞察", 
-        "4.远期预警 (>3天)"
+        "4.剩余(1-3天)订单"  # <-- 修改标题，强调紧迫性
     ])
 
     # === Tab 1: 风险与问题管控 ===
     with tab1:
-        st.markdown("### 📋 问题订单追踪 (Risk & Issues Log)")
-        
-        problem_mask = df['业务状态'].isin([
-            "🔴 严重逾期 (进行中)", 
-            "🟠 紧急 (3天内)", 
-            "⚠️ 逾期交付 (历史)"
-        ])
+        st.markdown("### 问题订单追踪")
+        problem_mask = df['业务状态'].isin(["🔴 严重逾期 (进行中)", "🟠 紧急 (3天内)", "⚠️ 逾期交付 (历史)"])
         problem_df = df[problem_mask].copy()
         
         status_priority = {
@@ -183,64 +158,26 @@ if df is not None:
         problem_df['priority'] = problem_df['业务状态'].map(status_priority)
         display_df = problem_df.sort_values(['priority', '时间差指标'])
         
-        if current_overdue == 0 and current_urgent == 0:
-            if history_bad > 0:
-                st.info("✅ 当前无进行中的风险订单。👇 **为您展示历史逾期记录，供复盘分析：**")
-            else:
-                st.success("🎉 太棒了！当前无风险，且历史上也没有逾期记录。")
+        if display_df.empty:
+            st.success("🎉 当前无风险订单。")
         else:
-            st.warning(f"⚠️ 发现 {current_overdue + current_urgent} 个进行中的风险订单，请优先处理！")
-
-        if not display_df.empty:
-            view_cols = ['业务状态', '样品传递单号', '客户', '款式', '设计员', '要求交期', '完工日期', '时间差指标']
-            
-            def highlight_row(val):
-                s = str(val)
-                if "严重" in s: return 'background-color: #ffe6e6; color: #b30000; font-weight: bold'
-                if "紧急" in s: return 'background-color: #fff8e1; color: #b38f00; font-weight: bold'
-                if "历史" in s: return 'color: #e65100; font-weight: bold'
-                return ''
-
             st.dataframe(
-                display_df[view_cols].style.map(highlight_row, subset=['业务状态']),
+                display_df[['业务状态', '样品传递单号', '客户', '款式', '设计员', '要求交期', '时间差指标']],
                 column_config={
-                    "业务状态": st.column_config.TextColumn("状态", width="medium"),
-                    "时间差指标": st.column_config.NumberColumn(
-                        "剩余/超期天数", 
-                        format="%d 天",
-                        help="负数=逾期天数；正数=历史超期天数"
-                    ),
-                    "要求交期": st.column_config.DateColumn("要求交期", format="YYYY-MM-DD"),
-                    "完工日期": st.column_config.DateColumn("实际完工", format="YYYY-MM-DD"),
+                    "时间差指标": st.column_config.NumberColumn("剩余/超期天数", format="%d 天"),
+                    "要求交期": st.column_config.DateColumn("要求交期", format="MM-DD"),
                 },
                 use_container_width=True,
-                height=600
+                height=500
             )
-        
-        if not display_df.empty:
-            st.divider()
-            c1, c2 = st.columns(2)
-            with c1:
-                bad_cust = display_df['客户'].value_counts().reset_index()
-                bad_cust.columns = ['客户', '问题单数']
-                fig = px.bar(bad_cust.head(10), x='客户', y='问题单数', title="🛑 问题订单最多的客户 (Top 10)", color='问题单数', color_continuous_scale='Reds')
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                if '样品类型' in df.columns:
-                    bad_type = df[df['业务状态'].str.contains("逾期") | df['业务状态'].str.contains("紧急")]['样品类型'].value_counts().reset_index()
-                    bad_type.columns = ['样品类型', '异常频次']
-                    fig2 = px.pie(bad_type, values='异常频次', names='样品类型', title="🛑 异常订单类型分布")
-                    st.plotly_chart(fig2, use_container_width=True)
 
-    # === Tab 2: 绩效 (X轴修改为款式数量) ===
+    # === Tab 2: 绩效 (款式数 X轴) ===
     with tab2:
-        st.markdown("### 🏆 技术部效能矩阵")
-        st.caption("🔍 **维度更新：** X轴已调整为“打样款式数量”。这能更真实地反映技术员的开发难度与工作量（避免推尺码/销售样导致数量虚高）。")
+        st.markdown("### 🏆 技术效能矩阵")
         
-        # 聚合逻辑修改：统计“款式”的唯一值 (nunique)
         perf_df = df.groupby('设计员').agg(
             总接单量=('样品传递单号', 'nunique'),
-            打样款式数=('款式', 'nunique')  # <--- 修改处
+            打样款式数=('款式', 'nunique')
         ).reset_index()
         
         finished_df = df[df['业务状态'].isin(["✅ 按时交付", "⚠️ 逾期交付 (历史)"])]
@@ -257,128 +194,115 @@ if df is not None:
             full_stats['及时率'] = (full_stats['及时单量'] / full_stats['考核单量'] * 100).round(1)
             full_stats = full_stats[full_stats['总接单量'] > 0] 
 
-            # 图表修改：X轴使用 打样款式数
             fig_bubble = px.scatter(
                 full_stats, x="打样款式数", y="及时率", size="总接单量", color="及时率",
                 text="设计员", color_continuous_scale="RdYlGn", size_max=60,
-                title="人员效能矩阵：开发款数(X) vs 及时率(Y)",
-                labels={"打样款式数": "开发款式总数 (款)", "及时率": "按时交付率 (%)", "总接单量": "处理单据数"}
+                title="人员效能：开发款式数(X) vs 及时率(Y)",
+                labels={"打样款式数": "开发款式 (款)", "及时率": "及时率 (%)"}
             )
-            # 增加基准线
-            fig_bubble.add_hline(y=90, line_dash="dot", annotation_text="90% 及格线", annotation_position="bottom right")
-            
+            fig_bubble.add_hline(y=90, line_dash="dot", annotation_text="90% 及格")
             st.plotly_chart(fig_bubble, use_container_width=True)
-        else:
-            st.info("暂无完工数据用于计算绩效。")
 
     # === Tab 3: 智能洞察 ===
     with tab3:
-        st.markdown("### 🧠 业务深层洞察")
+        st.markdown("### 业务洞察")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("#### 📅 月度逾期率趋势")
             df['月'] = df['要求交期'].dt.to_period('M').astype(str)
             trend_df = df.groupby('月').apply(lambda x: (x['业务状态'].str.contains('逾期')).sum() / len(x) * 100).reset_index(name='逾期率')
-            fig_trend = px.line(trend_df, x='月', y='逾期率', markers=True, title="月度逾期率变化 (%)")
-            st.plotly_chart(fig_trend, use_container_width=True)
-
+            st.plotly_chart(px.line(trend_df, x='月', y='逾期率', title="月度逾期率 %"), use_container_width=True)
         with c2:
-            st.markdown("#### 👔 业务员与逾期关联")
-            sales_delay = df[df['业务状态'].str.contains('逾期')].groupby('业务员').size().reset_index(name='逾期单数')
-            sales_delay = sales_delay.sort_values('逾期单数', ascending=False).head(10)
-            fig_sales = px.bar(sales_delay, x='逾期单数', y='业务员', orientation='h', title="各业务员名下逾期单数")
-            st.plotly_chart(fig_sales, use_container_width=True)
-
-        st.divider()
-        st.markdown("### 🤖 风险预警AI")
+            sales_delay = df[df['业务状态'].str.contains('逾期')].groupby('业务员').size().reset_index(name='单数').sort_values('单数', ascending=False).head(10)
+            st.plotly_chart(px.bar(sales_delay, x='单数', y='业务员', orientation='h', title="业务员逾期排行"), use_container_width=True)
+            
+        # AI 预测部分 (简化显示)
         train_df = df[df['业务状态'].isin(["✅ 按时交付", "⚠️ 逾期交付 (历史)"])].copy()
-        pred_df = df[df['业务状态'].isin(["🔵 正常进行", "🟠 紧急 (3天内)", "🔴 严重逾期 (进行中)"])].copy()
-        
-        if len(train_df) > 10 and len(pred_df) > 0:
-            train_df['Is_Late'] = train_df['业务状态'].apply(lambda x: 1 if "逾期" in str(x) else 0)
-            le_cust = LabelEncoder()
-            all_cust = pd.concat([train_df['客户'].astype(str), pred_df['客户'].astype(str)]).unique()
-            le_cust.fit(all_cust)
-            train_df['Cust_Code'] = le_cust.transform(train_df['客户'].astype(str))
-            pred_df['Cust_Code'] = le_cust.transform(pred_df['客户'].astype(str))
-            
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-            model.fit(train_df[['Cust_Code', '寄出总数量']], train_df['Is_Late'])
-            probs = model.predict_proba(pred_df[['Cust_Code', '寄出总数量']])[:, 1]
-            pred_df['风险指数'] = probs
-            
-            st.dataframe(
-                pred_df.sort_values('风险指数', ascending=False)[['样品传递单号', '客户', '业务员', '风险指数']],
-                column_config={"风险指数": st.column_config.ProgressColumn("预测延误率", format="%.0f%%")},
-                use_container_width=True
-            )
-        else:
-            if len(pred_df) == 0:
-                st.info("当前无进行中订单，无需预测。")
-            else:
-                st.warning("历史数据不足，AI 暂无法启动。")
+        pred_df = df[df['业务状态'].isin(["🔵 正常进行", "🟠 紧急 (3天内)"])].copy()
+        if len(train_df) > 5 and len(pred_df) > 0:
+             train_df['Is_Late'] = train_df['业务状态'].apply(lambda x: 1 if "逾期" in str(x) else 0)
+             le = LabelEncoder()
+             le.fit(pd.concat([train_df['客户'].astype(str), pred_df['客户'].astype(str)]).unique())
+             train_df['C'] = le.transform(train_df['客户'].astype(str))
+             pred_df['C'] = le.transform(pred_df['客户'].astype(str))
+             
+             model = RandomForestClassifier(n_estimators=50, random_state=42)
+             model.fit(train_df[['C', '寄出总数量']], train_df['Is_Late'])
+             pred_df['Risk'] = model.predict_proba(pred_df[['C', '寄出总数量']])[:, 1]
+             st.markdown("#### AI 风险预测")
+             st.dataframe(pred_df.sort_values('Risk', ascending=False)[['样品传递单号', '客户', 'Risk']].head(5), use_container_width=True)
 
-    # === Tab 4: 远期预警 (>3天) ===
+    # === Tab 4: 剩余(1-3天)订单 - 重点修改 ===
     with tab4:
-        st.markdown("### 🔭 远期交付压力监测 (Future Workload)")
-        st.caption("🔍 **策略说明：** 此页面筛选出所有**3天后**才到期的正常订单。其中 **4-10天** 内的订单处于“黄金补救窗口期”，此时介入成本最低。")
+        st.markdown("### 1-3日紧急订单 (Last Minute Rescue)")
+        st.caption("🚨 **预警逻辑：** 筛选距离截止日期 **仅剩 1-3 天** 的订单。如果不在此期间完成，3天后它们将全部变成逾期单！这是最后的补救窗口。")
 
-        future_df = df[df['业务状态'] == "🔵 正常进行"].copy()
+        # 1. 筛选逻辑修改：只看剩余天数在 [1, 3] 区间的
+        # 注意：时间差指标 = 截止 - 今天。
+        # 1天: 明天到期; 3天: 大后天到期. 
+        # 0天: 今天到期 (太晚了，归类为严重/Tab1处理，这里只看未来3天将死未死的)
+        rescue_mask = (df['时间差指标'] >= 1) & (df['时间差指标'] <= 3)
+        # 还要确保状态是未完成的
+        rescue_mask = rescue_mask & (df['完工日期'].isna() | (df['完工日期'] > current_date))
         
-        if not future_df.empty:
-            future_df['剩余天数'] = future_df['时间差指标']
-            mask_golden = (future_df['剩余天数'] > 3) & (future_df['剩余天数'] <= 10)
-            golden_df = future_df[mask_golden]
-            long_term_df = future_df[future_df['剩余天数'] > 10]
-            
+        rescue_df = df[rescue_mask].copy()
+
+        if not rescue_df.empty:
+            # --- 顶部 KPI ---
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.metric("🛡️ 黄金补救期 (4-10天)", f"{len(golden_df)} 单", "最该关注的预防区", delta_color="normal")
+                st.metric("3日内到期订单", f"{len(rescue_df)} 单", "必须优先排产", delta_color="inverse")
             with c2:
-                st.metric("📅 远期储备 (>10天)", f"{len(long_term_df)} 单", "按计划生产")
+                # 最紧迫的一天
+                most_urgent_day = rescue_df['时间差指标'].min()
+                st.metric("最短剩余时间", f"{most_urgent_day} 天", "立即产出", delta_color="inverse")
             with c3:
-                if not future_df.empty:
-                    peak_date_val = future_df['要求交期'].value_counts().idxmax()
-                    peak_count = future_df['要求交期'].value_counts().max()
-                    peak_str = peak_date_val.strftime("%m-%d") if pd.notnull(peak_date_val) else "未知"
-                    st.metric("⛰️ 未来交付峰值日", f"{peak_str}", f"单日 {peak_count} 单")
+                # 涉及多少个客户
+                cust_count = rescue_df['客户'].nunique()
+                st.metric("涉及客户数", f"{cust_count} 家", "需提前沟通")
 
             st.divider()
+
+            # --- 可视化与列表 ---
             c_chart, c_list = st.columns([1, 1])
-            
+
             with c_chart:
-                st.markdown("#### 📊 未来14天交付压力分布")
-                chart_df = future_df[future_df['剩余天数'] <= 14].groupby('要求交期').size().reset_index(name='单量')
-                if not chart_df.empty:
-                    fig_timeline = px.bar(
-                        chart_df, x='要求交期', y='单量', 
-                        text='单量',
-                        title="未来两周每日交货量",
-                        color='单量', color_continuous_scale='Blues'
-                    )
-                    fig_timeline.update_layout(xaxis_title="交期", yaxis_title="订单数", showlegend=False)
-                    st.plotly_chart(fig_timeline, use_container_width=True)
-                else:
-                    st.info("未来14天内无交期压力。")
+                st.markdown("#### 倒计时分布")
+                # 统计 1天剩多少, 2天剩多少, 3天剩多少
+                count_by_day = rescue_df['时间差指标'].value_counts().reset_index()
+                count_by_day.columns = ['剩余天数', '单量']
+                count_by_day['剩余天数标签'] = count_by_day['剩余天数'].apply(lambda x: f"剩 {x} 天")
+                
+                fig_rescue = px.bar(
+                    count_by_day, x='剩余天数标签', y='单量',
+                    text='单量',
+                    title="未来3天到期分布",
+                    color='剩余天数', color_continuous_scale='Reds_r' # 越少越红
+                )
+                st.plotly_chart(fig_rescue, use_container_width=True)
 
             with c_list:
-                st.markdown("#### 📝 黄金窗口期清单 (4-10天)")
-                if not golden_df.empty:
-                    view_cols = ['剩余天数', '要求交期', '样品传递单号', '客户', '设计员']
-                    st.dataframe(
-                        golden_df.sort_values('剩余天数')[view_cols],
-                        column_config={
-                            "剩余天数": st.column_config.NumberColumn("倒计时", format="还有 %d 天"),
-                            "要求交期": st.column_config.DateColumn("截止日", format="MM-DD"),
-                        },
-                        use_container_width=True,
-                        height=400,
-                        hide_index=True
-                    )
-                else:
-                    st.success("✅ 未来一周非常平稳，无进入预警区的订单。")
+                st.markdown("#### 优先排产清单 (按时间紧迫度)")
+                
+                # 颜色高亮：剩1天最红
+                def highlight_urgent(val):
+                    if val == 1: return 'background-color: #ffcccc; color: #cc0000; font-weight: bold'
+                    if val == 2: return 'background-color: #ffe6cc; color: #cc6600'
+                    return ''
+
+                view_cols = ['时间差指标', '要求交期', '样品传递单号', '客户', '设计员']
+                
+                st.dataframe(
+                    rescue_df.sort_values('时间差指标')[view_cols].style.map(highlight_urgent, subset=['时间差指标']),
+                    column_config={
+                        "时间差指标": st.column_config.NumberColumn("倒计时", format=" 剩 %d 天"),
+                        "要求交期": st.column_config.DateColumn("Deadline", format="MM-DD"),
+                    },
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True
+                )
         else:
-            st.success("🎉 目前没有任何未完成的远期订单。")
+            st.success("未来3天内没有即将到期的订单")
 
 else:
-    st.info("请在左侧上传数据文件。")
+    st.info("请上传数据文件。")
