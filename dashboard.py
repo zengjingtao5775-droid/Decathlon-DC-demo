@@ -25,6 +25,9 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #ffffff; border-radius: 4px; font-weight: 600; }
     .stTabs [aria-selected="true"] { background-color: #deebff; color: #0052cc; }
+    
+    /* 报告文本样式 */
+    .report-text { font-size: 16px; line-height: 1.6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,8 +88,6 @@ def load_business_data(file_path, simulation_date=None):
         if "历史" in row['业务状态']:
             return (done_date - deadline).days
         else:
-            # 无论逾期还是正常，都计算 截止日 - 今天
-            # 负数=已逾期，正数=剩余天数
             return (deadline - today).days
 
     df['时间差指标'] = df.apply(calc_days_gap, axis=1)
@@ -97,6 +98,36 @@ def load_business_data(file_path, simulation_date=None):
         if c in df.columns: df[c] = df[c].fillna("未知")
 
     return df, today
+
+# --- 自动化归因分析报告生成函数 ---
+def generate_insight_report(df, today):
+    risk_df = df[df['业务状态'].isin(["🔴 严重逾期 (进行中)", "🟠 紧急 (3天内)", "⚠️ 逾期交付 (历史)"])]
+    today_str = today.strftime("%Y-%m-%d")
+    total_count = len(df)
+    risk_count = len(risk_df)
+    
+    if risk_count == 0:
+        return True, f"""
+        ### ✅ {today_str} 生产运营日报
+        **状态：优**
+        今日生产线运行平稳，共监控 **{total_count}** 个订单，全线无逾期、无临期风险。
+        """
+    else:
+        top_cust = risk_df['客户'].value_counts().idxmax()
+        top_cust_count = risk_df['客户'].value_counts().max()
+        top_sales = risk_df['业务员'].value_counts().idxmax()
+        
+        return False, f"""
+        ### ⚠️ {today_str} 生产运营日报 (自动生成)
+        
+        当前监控订单总数 **{total_count}** 单，发现异常/风险单 **{risk_count}** 单。
+        
+        #### 📊 核心归因分析：
+        1.  **最大风险源 (客户)**：**{top_cust}**。该客户关联了 **{top_cust_count}** 个异常订单，占总异常的 {top_cust_count/risk_count*100:.0f}%。
+            * *行动建议：请业务部优先与 {top_cust} 确认船期或修改交期。*
+        2.  **内部负荷分析**：业务员 **{top_sales}** 名下的异常单据最多。
+            * *行动建议：建议主管检查该业务员是否存在单据积压或沟通受阻情况。*
+        """
 
 # --- 3. 页面渲染 ---
 
@@ -141,7 +172,7 @@ if df is not None:
         "1.风险管控 (Risk Log)", 
         "2.技术员绩效", 
         "3.智能洞察", 
-        "4.剩余(1-3天)订单"  # <-- 修改标题，强调紧迫性
+        "4.剩余(1-3天)订单"
     ])
 
     # === Tab 1: 风险与问题管控 ===
@@ -203,19 +234,38 @@ if df is not None:
             fig_bubble.add_hline(y=90, line_dash="dot", annotation_text="90% 及格")
             st.plotly_chart(fig_bubble, use_container_width=True)
 
-    # === Tab 3: 智能洞察 ===
+    # === Tab 3: 智能洞察 (简报 + 原有图表) ===
     with tab3:
         st.markdown("### 业务洞察")
+        
+        # 1. 自动化报告 (简报)
+        is_success, report_text = generate_insight_report(df, current_date)
+        st.markdown("#### 每日自动归因简报")
+        if is_success:
+            st.success(report_text)
+        else:
+            st.warning(report_text)
+            
+        st.divider()
+
+        # 2. 保留原有的图表分析 (重点保留)
+        st.markdown("#### 📈 关键数据趋势")
         c1, c2 = st.columns(2)
         with c1:
+            # 图表1：月度逾期率
             df['月'] = df['要求交期'].dt.to_period('M').astype(str)
             trend_df = df.groupby('月').apply(lambda x: (x['业务状态'].str.contains('逾期')).sum() / len(x) * 100).reset_index(name='逾期率')
-            st.plotly_chart(px.line(trend_df, x='月', y='逾期率', title="月度逾期率 %"), use_container_width=True)
+            fig_trend = px.line(trend_df, x='月', y='逾期率', title="月度逾期率趋势 (%)", markers=True)
+            st.plotly_chart(fig_trend, use_container_width=True)
         with c2:
+            # 图表2：业务员逾期排行
             sales_delay = df[df['业务状态'].str.contains('逾期')].groupby('业务员').size().reset_index(name='单数').sort_values('单数', ascending=False).head(10)
-            st.plotly_chart(px.bar(sales_delay, x='单数', y='业务员', orientation='h', title="业务员逾期排行"), use_container_width=True)
+            fig_sales = px.bar(sales_delay, x='单数', y='业务员', orientation='h', title="业务员逾期排行 (Top 10)")
+            st.plotly_chart(fig_sales, use_container_width=True)
             
-        # AI 预测部分 (简化显示)
+        st.divider()
+
+        # 3. AI 预测部分
         train_df = df[df['业务状态'].isin(["✅ 按时交付", "⚠️ 逾期交付 (历史)"])].copy()
         pred_df = df[df['业务状态'].isin(["🔵 正常进行", "🟠 紧急 (3天内)"])].copy()
         if len(train_df) > 5 and len(pred_df) > 0:
@@ -228,46 +278,37 @@ if df is not None:
              model = RandomForestClassifier(n_estimators=50, random_state=42)
              model.fit(train_df[['C', '寄出总数量']], train_df['Is_Late'])
              pred_df['Risk'] = model.predict_proba(pred_df[['C', '寄出总数量']])[:, 1]
-             st.markdown("#### AI 风险预测")
+             
+             st.markdown("#### 🤖 AI 风险预测 (Machine Learning)")
              st.dataframe(pred_df.sort_values('Risk', ascending=False)[['样品传递单号', '客户', 'Risk']].head(5), use_container_width=True)
 
-    # === Tab 4: 剩余(1-3天)订单 - 重点修改 ===
+    # === Tab 4: 剩余(1-3天)订单 ===
     with tab4:
         st.markdown("### 1-3日紧急订单 (Last Minute Rescue)")
         st.caption("🚨 **预警逻辑：** 筛选距离截止日期 **仅剩 1-3 天** 的订单。如果不在此期间完成，3天后它们将全部变成逾期单！这是最后的补救窗口。")
 
-        # 1. 筛选逻辑修改：只看剩余天数在 [1, 3] 区间的
-        # 注意：时间差指标 = 截止 - 今天。
-        # 1天: 明天到期; 3天: 大后天到期. 
-        # 0天: 今天到期 (太晚了，归类为严重/Tab1处理，这里只看未来3天将死未死的)
         rescue_mask = (df['时间差指标'] >= 1) & (df['时间差指标'] <= 3)
-        # 还要确保状态是未完成的
         rescue_mask = rescue_mask & (df['完工日期'].isna() | (df['完工日期'] > current_date))
         
         rescue_df = df[rescue_mask].copy()
 
         if not rescue_df.empty:
-            # --- 顶部 KPI ---
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.metric("3日内到期订单", f"{len(rescue_df)} 单", "必须优先排产", delta_color="inverse")
             with c2:
-                # 最紧迫的一天
                 most_urgent_day = rescue_df['时间差指标'].min()
                 st.metric("最短剩余时间", f"{most_urgent_day} 天", "立即产出", delta_color="inverse")
             with c3:
-                # 涉及多少个客户
                 cust_count = rescue_df['客户'].nunique()
                 st.metric("涉及客户数", f"{cust_count} 家", "需提前沟通")
 
             st.divider()
 
-            # --- 可视化与列表 ---
             c_chart, c_list = st.columns([1, 1])
 
             with c_chart:
                 st.markdown("#### 倒计时分布")
-                # 统计 1天剩多少, 2天剩多少, 3天剩多少
                 count_by_day = rescue_df['时间差指标'].value_counts().reset_index()
                 count_by_day.columns = ['剩余天数', '单量']
                 count_by_day['剩余天数标签'] = count_by_day['剩余天数'].apply(lambda x: f"剩 {x} 天")
@@ -276,14 +317,13 @@ if df is not None:
                     count_by_day, x='剩余天数标签', y='单量',
                     text='单量',
                     title="未来3天到期分布",
-                    color='剩余天数', color_continuous_scale='Reds_r' # 越少越红
+                    color='剩余天数', color_continuous_scale='Reds_r'
                 )
                 st.plotly_chart(fig_rescue, use_container_width=True)
 
             with c_list:
                 st.markdown("#### 优先排产清单 (按时间紧迫度)")
                 
-                # 颜色高亮：剩1天最红
                 def highlight_urgent(val):
                     if val == 1: return 'background-color: #ffcccc; color: #cc0000; font-weight: bold'
                     if val == 2: return 'background-color: #ffe6cc; color: #cc6600'
